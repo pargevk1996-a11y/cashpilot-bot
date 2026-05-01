@@ -24,8 +24,13 @@ dp = Dispatcher(storage=MemoryStorage())
 transactions = []
 
 CURRENCIES = ["USD", "EUR", "RUB", "GBP", "AMD"]
-
 BUY_RATE_DISCOUNT = 0.02
+
+
+class TransactionState(StatesGroup):
+    currency = State()
+    amount = State()
+    source = State()
 
 
 class CalculatorState(StatesGroup):
@@ -39,12 +44,6 @@ class ExchangeState(StatesGroup):
     amount = State()
     to_currency = State()
     confirm = State()
-
-
-class TransactionState(StatesGroup):
-    currency = State()
-    amount = State()
-    source = State()
 
 
 main_keyboard = ReplyKeyboardMarkup(
@@ -94,34 +93,6 @@ def parse_amount(text: str):
         return None
 
 
-async def convert_currency_buy_rate(
-    amount: float,
-    from_currency: str,
-    to_currency: str,
-) -> tuple[float, float, float]:
-    url = f"https://open.er-api.com/v6/latest/{from_currency}"
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as response:
-            if response.status != 200:
-                raise RuntimeError("Exchange API unavailable")
-
-            data = await response.json()
-
-            if data.get("result") != "success":
-                raise RuntimeError("Exchange API error")
-
-            market_rate = data.get("rates", {}).get(to_currency)
-
-            if not market_rate:
-                raise RuntimeError("Currency rate not found")
-
-            buy_rate = market_rate * (1 - BUY_RATE_DISCOUNT)
-            converted = amount * buy_rate
-
-            return converted, market_rate, buy_rate
-
-
 def calculate_balance(user_id: int):
     balances = {}
 
@@ -142,6 +113,46 @@ def calculate_balance(user_id: int):
         for currency, amount in balances.items()
         if abs(amount) > 0.0001
     }
+
+
+async def convert_currency_buy_rate(
+    amount: float,
+    from_currency: str,
+    to_currency: str,
+):
+    """
+    API is called ONLY when user requests calculation/exchange.
+    No background requests.
+    """
+
+    from_code = from_currency.lower()
+    to_code = to_currency.lower()
+
+    url = (
+        "https://cdn.jsdelivr.net/npm/@fawazahmed0/"
+        f"currency-api@latest/v1/currencies/{from_code}.json"
+    )
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as response:
+            if response.status != 200:
+                raise RuntimeError(f"Currency API error: HTTP {response.status}")
+
+            data = await response.json()
+
+            rates = data.get(from_code)
+            if not isinstance(rates, dict):
+                raise RuntimeError("Currency API returned invalid data")
+
+            market_rate = rates.get(to_code)
+            if market_rate is None:
+                raise RuntimeError(f"Rate {from_currency}->{to_currency} not found")
+
+            market_rate = float(market_rate)
+            buy_rate = market_rate * (1 - BUY_RATE_DISCOUNT)
+            converted = amount * buy_rate
+
+            return converted, market_rate, buy_rate
 
 
 @dp.message(CommandStart())
@@ -190,7 +201,6 @@ async def transaction_amount(message: types.Message, state: FSMContext):
         return await cancel_action(message, state)
 
     amount = parse_amount(message.text)
-
     if amount is None:
         return await message.answer("❌ Invalid amount. Example: 500")
 
@@ -323,7 +333,6 @@ async def calculator_amount(message: types.Message, state: FSMContext):
         return await cancel_action(message, state)
 
     amount = parse_amount(message.text)
-
     if amount is None:
         return await message.answer("❌ Invalid amount. Example: 500")
 
@@ -355,14 +364,13 @@ async def calculator_to_currency(message: types.Message, state: FSMContext):
 
     try:
         converted, market_rate, buy_rate = await convert_currency_buy_rate(
-            amount,
-            from_currency,
-            to_currency,
+            amount, from_currency, to_currency
         )
-    except Exception:
+    except Exception as error:
         await state.clear()
         return await message.answer(
-            "❌ Currency calculator is temporarily unavailable.",
+            f"❌ Currency calculator error.\n\n"
+            f"Reason: {error}",
             reply_markup=main_keyboard,
         )
 
@@ -415,7 +423,6 @@ async def exchange_amount(message: types.Message, state: FSMContext):
         return await cancel_action(message, state)
 
     amount = parse_amount(message.text)
-
     if amount is None:
         return await message.answer("❌ Invalid amount. Example: 500")
 
@@ -456,14 +463,13 @@ async def exchange_to_currency(message: types.Message, state: FSMContext):
 
     try:
         converted, market_rate, buy_rate = await convert_currency_buy_rate(
-            amount,
-            from_currency,
-            to_currency,
+            amount, from_currency, to_currency
         )
-    except Exception:
+    except Exception as error:
         await state.clear()
         return await message.answer(
-            "❌ Exchange service is temporarily unavailable.",
+            f"❌ Exchange error.\n\n"
+            f"Reason: {error}",
             reply_markup=main_keyboard,
         )
 
